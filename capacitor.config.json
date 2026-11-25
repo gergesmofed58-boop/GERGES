@@ -1,0 +1,13 @@
+{
+  "appId": "com.productionlines.shifttracker",
+  "appName": "متابع خطوط الإنتاج",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#F8FAFC",
+    "webContentsDebuggingEnabled": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
