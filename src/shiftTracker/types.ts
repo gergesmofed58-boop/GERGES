@@ -2,6 +2,8 @@ export type DayKey = 'sat' | 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri';
 
 export type LineCategory = 'production' | 'department' | 'absence';
 
+export type LineEffortLevel = 'heavy' | 'light';
+
 export type LineColorKey =
   | 'teal'
   | 'blue'
@@ -22,25 +24,55 @@ export interface WorkLine {
   color: LineColorKey;
   /** Default number of workers required to operate this line */
   requiredWorkers?: number;
+  /** 'heavy' = regular tiring production line, 'light' = rest/light station (e.g., manual packing) */
+  effortLevel?: LineEffortLevel;
   /** Only core absence statuses (absent/leave) are protected from deletion */
   isProtected?: boolean;
 }
+
+export type ShiftGroupId = 'groupA' | 'groupB';
+
+export const SHIFT_GROUP_LABELS: Record<ShiftGroupId, string> = {
+  groupA: 'المجموعة الأولى',
+  groupB: 'المجموعة الثانية',
+};
+
+export const NIGHT_SHIFT_LABEL = 'الوردية الليلية';
 
 export interface Worker {
   id: string;
   name: string;
   role: string;
+  /** Which alternating night-shift team this worker belongs to (40 workers per group) */
+  groupId?: ShiftGroupId;
   defaultLineId?: string;
-  /** Fixed key operator on a specific line (excluded from fair rotation whenever this line is running) */
+  /** Legacy single fixed line ID (kept for backwards compatibility with older saved data) */
   fixedLineId?: string;
+  /** One or more production lines where this worker is a fixed key operator (outside fair rotation whenever any of these lines run) */
+  fixedLineIds?: string[];
   active: boolean;
 }
 
-export type ShiftType = 'morning' | 'evening' | 'night';
+export function getWorkerGroupId(worker: Worker): ShiftGroupId {
+  return worker.groupId === 'groupB' ? 'groupB' : 'groupA';
+}
+
+export function getWorkerFixedLineIds(worker: Worker): string[] {
+  if (Array.isArray(worker.fixedLineIds)) {
+    return worker.fixedLineIds;
+  }
+  return worker.fixedLineId ? [worker.fixedLineId] : [];
+}
+
+export function isLightRestLine(line: WorkLine | undefined): boolean {
+  if (!line) return false;
+  if (line.effortLevel) return line.effortLevel === 'light';
+  return line.id === 'manual_packing';
+}
+
+export type ShiftType = 'night';
 
 export const SHIFT_LABELS: Record<ShiftType, string> = {
-  morning: 'الوردية الصباحية',
-  evening: 'الوردية المسائية',
   night: 'الوردية الليلية',
 };
 
@@ -61,6 +93,8 @@ export interface WeekRecord {
   weekStartIso: string;
   includeFriday: boolean;
   shiftType?: ShiftType;
+  /** Which night-shift group is scheduled for this week (alternates week-by-week) */
+  activeGroupId?: ShiftGroupId;
   dayNotes?: Partial<Record<DayKey, string>>;
   assignments: WeekAssignments;
 }
@@ -70,6 +104,7 @@ export interface TrackerState {
   lines: WorkLine[];
   weeks: Record<string, WeekRecord>;
   activeWeekIso: string;
+  activeGroupId?: ShiftGroupId;
   isDemoData: boolean;
   schemaVersion?: number;
 }
@@ -155,6 +190,7 @@ export const DEFAULT_LINES: WorkLine[] = [
     category: 'production',
     color: 'amber',
     requiredWorkers: 6,
+    effortLevel: 'light',
   },
   {
     id: 'dept_tablets',
@@ -345,18 +381,19 @@ export function getTodayDayKey(): DayKey {
 
 export function createEmptyWeek(
   weekStartIso: string,
-  shiftType: ShiftType = 'morning'
+  activeGroupId: ShiftGroupId = 'groupA'
 ): WeekRecord {
   return {
     weekStartIso,
     includeFriday: false,
-    shiftType,
+    shiftType: 'night',
+    activeGroupId,
     dayNotes: {},
     assignments: {},
   };
 }
 
-const DEMO_40_NAMES: string[] = [
+const DEMO_40_NAMES_GROUP_A: string[] = [
   'محمد أحمد',
   'محمود حسن',
   'كريم سعيد',
@@ -399,11 +436,57 @@ const DEMO_40_NAMES: string[] = [
   'مروان خالد',
 ];
 
-export function createBlank40Workers(): Worker[] {
+const DEMO_40_NAMES_GROUP_B: string[] = [
+  'أحمد سليم',
+  'طارق عبد العزيز',
+  'مجدي فوزي',
+  'عصام الدين علي',
+  'وائل حامد',
+  'أمير شحاتة',
+  'جمال عبد الناصر',
+  'محسن زكي',
+  'صبري محمد',
+  'ناصر إبراهيم',
+  'شعبان رجب',
+  'فتحي عبد الحميد',
+  'خلف الله حسن',
+  'محمود عبد الستار',
+  'إيهاب مصطفى',
+  'هيثم سعد',
+  'رامز عزيز',
+  'بولا وجيه',
+  'أبانوب عاطف',
+  'كيرلس ناجي',
+  'جورج ماهر',
+  'عماد رأفت',
+  'عاطف صبحي',
+  'سالم عيد',
+  'رجب محمود',
+  'عبد الله ياسين',
+  'أدهم سامح',
+  'سيف الدين طارق',
+  'بلال حمدي',
+  'حمزة خالد',
+  'معاذ شريف',
+  'أنس تامر',
+  'يحيى هشام',
+  'مالك وائل',
+  'مازن عصام',
+  'نور الدين علي',
+  'عادل مختار',
+  'سليمان فرج',
+  'فرجاني سعد',
+  'زكريا حمدان',
+];
+
+export function createBlank40Workers(groupId: ShiftGroupId = 'groupA'): Worker[] {
+  const prefix = groupId === 'groupA' ? 'أ' : 'ب';
+  const baseTs = Date.now();
   return Array.from({ length: 40 }, (_, i) => ({
-    id: `w_${Date.now()}_${i + 1}`,
-    name: `عامل ${i + 1}`,
+    id: `w_${groupId}_${baseTs}_${i + 1}`,
+    name: `عامل ${prefix} ${i + 1}`,
     role: 'عامل إنتاج',
+    groupId,
     defaultLineId: i < 18 ? 'antinal' : i < 38 ? 'apidone' : 'printing',
     active: true,
   }));
@@ -411,21 +494,28 @@ export function createBlank40Workers(): Worker[] {
 
 export function createInitialDemoState(): TrackerState {
   const currentSat = getSaturdayIso();
-  const demoWorkers: Worker[] = DEMO_40_NAMES.map((name, i) => ({
-    id: `w${i + 1}`,
+  const demoWorkersA: Worker[] = DEMO_40_NAMES_GROUP_A.map((name, i) => ({
+    id: `wA_${i + 1}`,
     name,
-    role: i % 8 === 0 ? 'مشغل خط' : i % 9 === 0 ? 'فني طباعة' : 'عامل إنتاج',
+    role: i % 8 === 0 ? 'مشغل ماكينة' : i % 9 === 0 ? 'فني طباعة' : 'عامل إنتاج',
+    groupId: 'groupA',
     defaultLineId:
       i < 18 ? 'antinal' : i < 38 ? 'apidone' : i === 38 ? 'printing' : 'manual_packing',
     active: true,
   }));
 
-  // Realistic 40-worker schedule matching actual line capacities:
-  // Sat: Antinal (18) + Apidone (20) + Printing (2) = 40
-  // Sun: Enemax Pack (24) + Tamper Enemax (8) + BBC (6) + Absent (2) = 40
-  // Mon: Antinal (18) + BBC (12) + Manual Packing (6) + Tablets (2) + Effervescent (1) + Absent (1) = 40
+  const demoWorkersB: Worker[] = DEMO_40_NAMES_GROUP_B.map((name, i) => ({
+    id: `wB_${i + 1}`,
+    name,
+    role: i % 8 === 0 ? 'مشغل ماكينة' : i % 9 === 0 ? 'فني طباعة' : 'عامل إنتاج',
+    groupId: 'groupB',
+    defaultLineId:
+      i < 18 ? 'antinal' : i < 38 ? 'apidone' : i === 38 ? 'printing' : 'manual_packing',
+    active: true,
+  }));
+
   const demoAssignments: WeekAssignments = {};
-  demoWorkers.forEach((w, idx) => {
+  demoWorkersA.forEach((w, idx) => {
     const satLine = idx < 18 ? 'antinal' : idx < 38 ? 'apidone' : 'printing';
 
     let sunLine = 'enemax_pack';
@@ -452,19 +542,21 @@ export function createInitialDemoState(): TrackerState {
   });
 
   return {
-    workers: demoWorkers,
+    workers: [...demoWorkersA, ...demoWorkersB],
     lines: DEFAULT_LINES,
     weeks: {
       [currentSat]: {
         weekStartIso: currentSat,
         includeFriday: false,
-        shiftType: 'morning',
+        shiftType: 'night',
+        activeGroupId: 'groupA',
         dayNotes: {},
         assignments: demoAssignments,
       },
     },
     activeWeekIso: currentSat,
+    activeGroupId: 'groupA',
     isDemoData: true,
-    schemaVersion: 3,
+    schemaVersion: 4,
   };
 }

@@ -17,14 +17,18 @@ import {
   LINE_COLOR_STYLES,
   LineCategory,
   LineColorKey,
+  LineEffortLevel,
   TrackerState,
   WorkLine,
   Worker,
+  getWorkerFixedLineIds,
+  isLightRestLine,
 } from './types';
 
 interface WorkersLinesViewProps {
   workers: Worker[];
   lines: WorkLine[];
+  groupLabel: string;
   fullState: TrackerState;
   onAddWorker: (worker: Omit<Worker, 'id' | 'active'>) => void;
   onBulkAddWorkers: (names: string[]) => void;
@@ -53,6 +57,7 @@ const LINE_COLORS: Array<{ key: LineColorKey; label: string }> = [
 export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
   workers,
   lines,
+  groupLabel,
   fullState,
   onAddWorker,
   onBulkAddWorkers,
@@ -69,7 +74,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
   const [name, setName] = useState('');
   const [role, setRole] = useState('عامل إنتاج');
   const [defaultLineId, setDefaultLineId] = useState('antinal');
-  const [fixedLineId, setFixedLineId] = useState('');
+  const [fixedLineIds, setFixedLineIds] = useState<string[]>([]);
 
   // Bulk add
   const [showBulk, setShowBulk] = useState(false);
@@ -80,7 +85,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
   const [editWorkerName, setEditWorkerName] = useState('');
   const [editWorkerRole, setEditWorkerRole] = useState('');
   const [editWorkerDefaultLine, setEditWorkerDefaultLine] = useState('');
-  const [editWorkerFixedLine, setEditWorkerFixedLine] = useState('');
+  const [editWorkerFixedLines, setEditWorkerFixedLines] = useState<string[]>([]);
   const [confirmDeleteWorkerId, setConfirmDeleteWorkerId] = useState<string | null>(null);
 
   // Add custom line form
@@ -88,6 +93,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
   const [newLineShort, setNewLineShort] = useState('');
   const [newLineCapacity, setNewLineCapacity] = useState('12');
   const [newLineCategory, setNewLineCategory] = useState<LineCategory>('production');
+  const [newLineEffort, setNewLineEffort] = useState<LineEffortLevel>('heavy');
   const [newLineColor, setNewLineColor] = useState<LineColorKey>('emerald');
 
   // Inline edit ANY line
@@ -96,6 +102,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
   const [editLineShort, setEditLineShort] = useState('');
   const [editLineCap, setEditLineCap] = useState('0');
   const [editLineCat, setEditLineCat] = useState<LineCategory>('production');
+  const [editLineEffort, setEditLineEffort] = useState<LineEffortLevel>('heavy');
   const [editLineColor, setEditLineColor] = useState<LineColorKey>('teal');
   const [confirmDeleteLineId, setConfirmDeleteLineId] = useState<string | null>(null);
 
@@ -111,6 +118,30 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
     return w.name.toLowerCase().includes(q) || w.role.toLowerCase().includes(q);
   });
 
+  const toggleIdInList = (list: string[], id: string) =>
+    list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+
+  const addFixedOperatorToLine = (workerId: string, lineId: string) => {
+    const w = workers.find((x) => x.id === workerId);
+    if (!w) return;
+    const curr = getWorkerFixedLineIds(w);
+    if (curr.includes(lineId)) return;
+    onUpdateWorker(workerId, {
+      fixedLineId: undefined,
+      fixedLineIds: [...curr, lineId],
+    });
+  };
+
+  const removeFixedOperatorFromLine = (workerId: string, lineId: string) => {
+    const w = workers.find((x) => x.id === workerId);
+    if (!w) return;
+    const next = getWorkerFixedLineIds(w).filter((id) => id !== lineId);
+    onUpdateWorker(workerId, {
+      fixedLineId: undefined,
+      fixedLineIds: next.length > 0 ? next : undefined,
+    });
+  };
+
   const handleAddSingle = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanName = name.trim();
@@ -119,10 +150,10 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
       name: cleanName,
       role: role.trim() || 'عامل إنتاج',
       defaultLineId: defaultLineId || undefined,
-      fixedLineId: fixedLineId || undefined,
+      fixedLineIds: fixedLineIds.length > 0 ? fixedLineIds : undefined,
     });
     setName('');
-    setFixedLineId('');
+    setFixedLineIds([]);
   };
 
   const handleBulkSubmit = () => {
@@ -141,7 +172,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
     setEditWorkerName(w.name);
     setEditWorkerRole(w.role);
     setEditWorkerDefaultLine(w.defaultLineId ?? '');
-    setEditWorkerFixedLine(w.fixedLineId ?? '');
+    setEditWorkerFixedLines(getWorkerFixedLineIds(w));
     setConfirmDeleteWorkerId(null);
   };
 
@@ -152,7 +183,8 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
       name: cleanName,
       role: editWorkerRole.trim() || 'عامل إنتاج',
       defaultLineId: editWorkerDefaultLine || undefined,
-      fixedLineId: editWorkerFixedLine || undefined,
+      fixedLineId: undefined,
+      fixedLineIds: editWorkerFixedLines.length > 0 ? editWorkerFixedLines : undefined,
     });
     setEditingWorkerId(null);
   };
@@ -168,10 +200,12 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
       category: newLineCategory,
       color: newLineColor,
       requiredWorkers: newLineCategory === 'production' ? cap : 0,
+      effortLevel: newLineCategory === 'production' ? newLineEffort : undefined,
     });
     setNewLineName('');
     setNewLineShort('');
     setNewLineCapacity('12');
+    setNewLineEffort('heavy');
   };
 
   const startEditLine = (line: WorkLine) => {
@@ -180,6 +214,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
     setEditLineShort(line.shortName);
     setEditLineCap(String(line.requiredWorkers ?? 0));
     setEditLineCat(line.category);
+    setEditLineEffort(isLightRestLine(line) ? 'light' : 'heavy');
     setEditLineColor(line.color);
     setConfirmDeleteLineId(null);
   };
@@ -188,12 +223,14 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
     const cleanName = editLineName.trim();
     if (!cleanName) return;
     const cap = Math.max(0, parseInt(editLineCap, 10) || 0);
+    const finalCat = line.isProtected ? line.category : editLineCat;
     onUpdateLine(line.id, {
       name: cleanName,
       shortName: editLineShort.trim() || cleanName.slice(0, 12),
-      category: line.isProtected ? line.category : editLineCat,
+      category: finalCat,
       color: editLineColor,
       requiredWorkers: line.category === 'absence' ? 0 : cap,
+      effortLevel: finalCat === 'production' ? editLineEffort : undefined,
     });
     setEditingLineId(null);
   };
@@ -312,6 +349,16 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
                         <option value="department">قسم آخر</option>
                       </select>
                     )}
+                    {editLineCat === 'production' && !line.isProtected && (
+                      <select
+                        value={editLineEffort}
+                        onChange={(e) => setEditLineEffort(e.target.value as LineEffortLevel)}
+                        className="min-h-[38px] px-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-900 dark:text-slate-100"
+                      >
+                        <option value="heavy">شغل خط (مجهد)</option>
+                        <option value="light">شغل راحة / خفيف</option>
+                      </select>
+                    )}
                     <select
                       value={editLineColor}
                       onChange={(e) => setEditLineColor(e.target.value as LineColorKey)}
@@ -365,6 +412,12 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
                       {line.category !== 'absence' && (line.requiredWorkers ?? 0) > 0
                         ? ` · يحتاج ${line.requiredWorkers} عامل`
                         : ''}
+                      {line.category === 'production' && isLightRestLine(line) && (
+                        <span className="text-teal-700 dark:text-teal-400 font-bold">
+                          {' '}
+                          · شغل راحة / خفيف
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -458,6 +511,17 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
             <option value="production">خط إنتاج</option>
             <option value="department">قسم تاني</option>
           </select>
+          {newLineCategory === 'production' && (
+            <select
+              aria-label="طبيعة مجهود الخط"
+              value={newLineEffort}
+              onChange={(e) => setNewLineEffort(e.target.value as LineEffortLevel)}
+              className="min-h-[42px] px-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-900 dark:text-slate-100"
+            >
+              <option value="heavy">شغل خط (مجهد)</option>
+              <option value="light">شغل راحة / خفيف</option>
+            </select>
+          )}
           <div className="flex items-center gap-2">
             <select
               aria-label="لون الخط الجديد"
@@ -482,16 +546,16 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
         </form>
       </section>
 
-      {/* Section 1.5: Fixed Key Line Operators (Outside Fair Rotation When Their Line Runs) */}
+      {/* Section 1.5: Fixed Key Line Operators (Multi-Line Supported, Outside Fair Rotation) */}
       <section className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-4">
         <div className="flex items-center gap-2">
           <Pin className="w-5 h-5 text-amber-700 dark:text-amber-400 shrink-0" />
           <div>
             <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100">
-              العمالة الأساسية على الخطوط (خارج التوزيع العادل)
+              العمالة الأساسية على الخطوط — {groupLabel} (خارج التوزيع العادل)
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              حدّد مشغّلي الماكينات أو العمالة الأساسية لكل خط — أي عامل هنا ينزل على خطه تلقائي كل يوم طالما خطه شغال، ولو خطه واقف يدخل التوزيع العادل عادي
+              تقدر تثبّت نفس العامل أساسي على أكتر من خط (مثلاً مشغّل ماكينة للانتينال والابيدون معاً) — أي خط منهم يشتغل ينزل عليه تلقائي وبرة التدوير
             </p>
           </div>
         </div>
@@ -499,8 +563,12 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {productionLinesOnly.map((line) => {
             const styles = LINE_COLOR_STYLES[line.color];
-            const pinnedWorkers = workers.filter((w) => w.fixedLineId === line.id);
-            const availableToPin = workers.filter((w) => w.fixedLineId !== line.id);
+            const pinnedWorkers = workers.filter((w) =>
+              getWorkerFixedLineIds(w).includes(line.id)
+            );
+            const availableToPin = workers.filter(
+              (w) => !getWorkerFixedLineIds(w).includes(line.id)
+            );
 
             return (
               <div
@@ -533,7 +601,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
                           <span>{w.name}</span>
                           <button
                             type="button"
-                            onClick={() => onUpdateWorker(w.id, { fixedLineId: undefined })}
+                            onClick={() => removeFixedOperatorFromLine(w.id, line.id)}
                             aria-label={`إلغاء تثبيت ${w.name} من ${line.name}`}
                             className="text-slate-400 hover:text-rose-600 transition-colors"
                           >
@@ -554,19 +622,22 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
                   value=""
                   onChange={(e) => {
                     if (!e.target.value) return;
-                    onUpdateWorker(e.target.value, { fixedLineId: line.id });
+                    addFixedOperatorToLine(e.target.value, line.id);
                   }}
                   className="w-full min-h-[38px] px-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200"
                 >
                   <option value="">+ إضافة عامل أساسي للخط...</option>
                   {availableToPin.map((w) => {
-                    const prevLine = w.fixedLineId
-                      ? lines.find((l) => l.id === w.fixedLineId)
-                      : undefined;
+                    const otherLines = getWorkerFixedLineIds(w)
+                      .map((id) => lines.find((l) => l.id === id)?.shortName)
+                      .filter(Boolean);
                     return (
                       <option key={w.id} value={w.id}>
                         {w.name} ({w.role}
-                        {prevLine ? ` · أساسي ${prevLine.shortName}` : ''})
+                        {otherLines.length > 0
+                          ? ` · أساسي أيضاً: ${otherLines.join('، ')}`
+                          : ''}
+                        )
                       </option>
                     );
                   })}
@@ -584,7 +655,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
             <Users className="w-5 h-5 text-teal-700 dark:text-teal-400" />
             <div>
               <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100">
-                جدول أسماء العمال ({workers.length} اسم)
+                جدول أسماء العمال — {groupLabel} ({workers.length} اسم)
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 عدّل أي اسم أو أضف أسماء فردي أو جماعي مرة واحدة بدون ما تفقد أي سجل سابق
@@ -599,7 +670,7 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
                 onClick={onFillUpTo40Workers}
                 className="min-h-[38px] px-3.5 rounded-xl border border-teal-200 dark:border-teal-800 bg-teal-50/70 dark:bg-teal-950/30 text-xs font-bold text-teal-800 dark:text-teal-200 whitespace-nowrap"
               >
-                إكمال الجدول إلى 40 اسم
+                إكمال {groupLabel} إلى 40 اسم
               </button>
             )}
             <button
@@ -615,53 +686,66 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
         {/* Single Add Form */}
         <form
           onSubmit={handleAddSingle}
-          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2.5 pt-3 border-t border-slate-200 dark:border-slate-800"
+          className="space-y-3 pt-3 border-t border-slate-200 dark:border-slate-800"
         >
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="اسم العامل الجديد..."
-            className="min-h-[42px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-teal-600/40 focus:border-teal-600 lg:col-span-2"
-          />
-          <input
-            type="text"
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            placeholder="الوظيفة (مشغل ماكينة / عامل)"
-            className="min-h-[42px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-slate-100"
-          />
-          <select
-            value={defaultLineId}
-            onChange={(e) => setDefaultLineId(e.target.value)}
-            className="min-h-[42px] px-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-slate-100"
-          >
-            <option value="">بدون خط افتراضي</option>
-            {workLinesOnly.map((l) => (
-              <option key={l.id} value={l.id}>
-                افتراضي: {l.name}
-              </option>
-            ))}
-          </select>
-          <select
-            value={fixedLineId}
-            onChange={(e) => setFixedLineId(e.target.value)}
-            className="min-h-[42px] px-3 rounded-xl bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800/70 text-xs font-semibold text-slate-900 dark:text-slate-100"
-          >
-            <option value="">يدخل التوزيع العادل</option>
-            {productionLinesOnly.map((l) => (
-              <option key={l.id} value={l.id}>
-                أساسي ثابت: {l.name}
-              </option>
-            ))}
-          </select>
-          <button
-            type="submit"
-            className="min-h-[42px] px-4 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
-          >
-            <UserPlus className="w-4 h-4" />
-            <span>إضافة العامل</span>
-          </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="اسم العامل الجديد..."
+              className="min-h-[42px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-teal-600/40 focus:border-teal-600 lg:col-span-2"
+            />
+            <input
+              type="text"
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              placeholder="الوظيفة (مشغل ماكينة / عامل)"
+              className="min-h-[42px] px-3.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-sm text-slate-900 dark:text-slate-100"
+            />
+            <select
+              value={defaultLineId}
+              onChange={(e) => setDefaultLineId(e.target.value)}
+              className="min-h-[42px] px-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-slate-100"
+            >
+              <option value="">بدون خط افتراضي</option>
+              {workLinesOnly.map((l) => (
+                <option key={l.id} value={l.id}>
+                  افتراضي: {l.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="submit"
+              className="min-h-[42px] px-4 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 whitespace-nowrap transition-colors"
+            >
+              <UserPlus className="w-4 h-4" />
+              <span>إضافة العامل</span>
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span className="font-semibold text-slate-500 dark:text-slate-400">
+              تثبيت أساسي على خط أو أكتر (اختياري):
+            </span>
+            {productionLinesOnly.map((l) => {
+              const active = fixedLineIds.includes(l.id);
+              return (
+                <button
+                  key={l.id}
+                  type="button"
+                  onClick={() => setFixedLineIds((prev) => toggleIdInList(prev, l.id))}
+                  className={`min-h-[30px] px-2.5 rounded-lg border font-semibold transition-colors ${
+                    active
+                      ? 'bg-amber-600 border-amber-600 text-white'
+                      : 'bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {l.shortName}
+                </button>
+              );
+            })}
+          </div>
         </form>
 
         {/* Bulk Add Textarea */}
@@ -726,68 +810,83 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
               const isEditing = editingWorkerId === worker.id;
               const isConfirmingDel = confirmDeleteWorkerId === worker.id;
               const defLine = lines.find((l) => l.id === worker.defaultLineId);
-              const fixedLine = worker.fixedLineId
-                ? lines.find((l) => l.id === worker.fixedLineId)
-                : undefined;
+              const workerFixedNames = getWorkerFixedLineIds(worker)
+                .map((id) => lines.find((l) => l.id === id)?.shortName)
+                .filter(Boolean);
 
               if (isEditing) {
                 return (
                   <div
                     key={worker.id}
-                    className="p-3.5 bg-teal-50/40 dark:bg-teal-950/20 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 items-center"
+                    className="p-3.5 bg-teal-50/40 dark:bg-teal-950/20 space-y-2.5"
                   >
-                    <input
-                      type="text"
-                      value={editWorkerName}
-                      onChange={(e) => setEditWorkerName(e.target.value)}
-                      className="min-h-[38px] px-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-sm text-slate-900 dark:text-slate-100"
-                    />
-                    <input
-                      type="text"
-                      value={editWorkerRole}
-                      onChange={(e) => setEditWorkerRole(e.target.value)}
-                      className="min-h-[38px] px-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-sm text-slate-900 dark:text-slate-100"
-                    />
-                    <select
-                      value={editWorkerDefaultLine}
-                      onChange={(e) => setEditWorkerDefaultLine(e.target.value)}
-                      className="min-h-[38px] px-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-slate-100"
-                    >
-                      <option value="">بدون خط افتراضي</option>
-                      {workLinesOnly.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          افتراضي: {l.name}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={editWorkerFixedLine}
-                      onChange={(e) => setEditWorkerFixedLine(e.target.value)}
-                      className="min-h-[38px] px-2.5 rounded-lg bg-amber-50/70 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 text-xs font-semibold text-slate-900 dark:text-slate-100"
-                    >
-                      <option value="">يدخل التوزيع العادل</option>
-                      {productionLinesOnly.map((l) => (
-                        <option key={l.id} value={l.id}>
-                          أساسي ثابت: {l.name}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="flex items-center justify-end gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => saveEditWorker(worker.id)}
-                        className="min-h-[36px] px-3 rounded-lg bg-teal-700 text-white text-xs font-bold flex items-center gap-1"
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 items-center">
+                      <input
+                        type="text"
+                        value={editWorkerName}
+                        onChange={(e) => setEditWorkerName(e.target.value)}
+                        className="min-h-[38px] px-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-sm text-slate-900 dark:text-slate-100"
+                      />
+                      <input
+                        type="text"
+                        value={editWorkerRole}
+                        onChange={(e) => setEditWorkerRole(e.target.value)}
+                        className="min-h-[38px] px-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-sm text-slate-900 dark:text-slate-100"
+                      />
+                      <select
+                        value={editWorkerDefaultLine}
+                        onChange={(e) => setEditWorkerDefaultLine(e.target.value)}
+                        className="min-h-[38px] px-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-slate-100"
                       >
-                        <Check className="w-3.5 h-3.5" />
-                        <span>حفظ</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setEditingWorkerId(null)}
-                        className="min-h-[36px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300"
-                      >
-                        إلغاء
-                      </button>
+                        <option value="">بدون خط افتراضي</option>
+                        {workLinesOnly.map((l) => (
+                          <option key={l.id} value={l.id}>
+                            افتراضي: {l.name}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => saveEditWorker(worker.id)}
+                          className="min-h-[36px] px-3 rounded-lg bg-teal-700 text-white text-xs font-bold flex items-center gap-1"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>حفظ</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingWorkerId(null)}
+                          className="min-h-[36px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300"
+                        >
+                          إلغاء
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                      <span className="font-semibold text-amber-800 dark:text-amber-300">
+                        أساسي ثابت على (اختر خط أو أكتر):
+                      </span>
+                      {productionLinesOnly.map((l) => {
+                        const active = editWorkerFixedLines.includes(l.id);
+                        return (
+                          <button
+                            key={l.id}
+                            type="button"
+                            onClick={() =>
+                              setEditWorkerFixedLines((prev) => toggleIdInList(prev, l.id))
+                            }
+                            className={`min-h-[30px] px-2.5 rounded-lg border font-semibold transition-colors ${
+                              active
+                                ? 'bg-amber-600 border-amber-600 text-white'
+                                : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                            }`}
+                          >
+                            {l.shortName}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 );
@@ -807,10 +906,10 @@ export const WorkersLinesView: React.FC<WorkersLinesViewProps> = ({
                         <span className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">
                           {worker.name}
                         </span>
-                        {fixedLine && (
+                        {workerFixedNames.length > 0 && (
                           <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 dark:text-amber-300">
-                            <Pin className="w-3 h-3" />
-                            <span>أساسي على {fixedLine.shortName} (خارج التوزيع)</span>
+                            <Pin className="w-3 h-3 shrink-0" />
+                            <span>أساسي: {workerFixedNames.join('، ')} (خارج التوزيع)</span>
                           </span>
                         )}
                       </div>

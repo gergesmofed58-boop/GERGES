@@ -5,12 +5,15 @@ import {
   Check,
   Copy,
   Download,
+  LayoutGrid,
   Printer,
   Search,
   Share2,
+  Table2,
 } from 'lucide-react';
 import {
   LINE_COLOR_STYLES,
+  NIGHT_SHIFT_LABEL,
   WeekRecord,
   WorkLine,
   Worker,
@@ -32,6 +35,7 @@ interface SummaryReportsViewProps {
   lines: WorkLine[];
   activeWeek: WeekRecord;
   allWeeks: Record<string, WeekRecord>;
+  groupLabel: string;
   selectedWorkerId: string | null;
   onSelectWorker: (workerId: string | null) => void;
 }
@@ -41,11 +45,13 @@ export const SummaryReportsView: React.FC<SummaryReportsViewProps> = ({
   lines,
   activeWeek,
   allWeeks,
+  groupLabel,
   selectedWorkerId,
   onSelectWorker,
 }) => {
   const [scope, setScope] = useState<'week' | 'all'>('week');
   const [search, setSearch] = useState('');
+  const [mobileLayout, setMobileLayout] = useState<'cards' | 'table'>('cards');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const weekCount = Object.keys(allWeeks).length;
@@ -133,7 +139,8 @@ export const SummaryReportsView: React.FC<SummaryReportsViewProps> = ({
               ملخص حساب الأيام لكل فرد
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
-              {periodLabel} · إجمالي الشغل: {formatNumClean(totalWorkedAll)} يوم/فرد · الغياب:{' '}
+              {NIGHT_SHIFT_LABEL} · {groupLabel} · {periodLabel} · إجمالي الشغل:{' '}
+              {formatNumClean(totalWorkedAll)} يوم/فرد · الغياب:{' '}
               {formatNumClean(totalAbsentAll)} يوم
               {totalOvertimeAll > 0 ? ` · إضافي: ${formatNumClean(totalOvertimeAll)} ساعة` : ''}
             </p>
@@ -171,7 +178,7 @@ export const SummaryReportsView: React.FC<SummaryReportsViewProps> = ({
               onClick={() =>
                 copyText(
                   'weekly-all',
-                  buildWeeklyWhatsappReport(summaries, lines, activeWeek)
+                  buildWeeklyWhatsappReport(summaries, lines, activeWeek, groupLabel)
                 )
               }
               className="min-h-[38px] px-3.5 rounded-xl bg-teal-700 hover:bg-teal-800 text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap transition-colors"
@@ -188,7 +195,7 @@ export const SummaryReportsView: React.FC<SummaryReportsViewProps> = ({
 
             <button
               type="button"
-              onClick={() => exportWeeklyCsv(summaries, lines, periodLabel)}
+              onClick={() => exportWeeklyCsv(summaries, lines, periodLabel, groupLabel)}
               className="min-h-[38px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5 whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5 text-teal-700 dark:text-teal-400" />
@@ -231,7 +238,7 @@ export const SummaryReportsView: React.FC<SummaryReportsViewProps> = ({
                 onClick={() =>
                   copyText(
                     `worker-${activeWorkerSummary.worker.id}`,
-                    buildWorkerWhatsappText(activeWorkerSummary, lines, periodLabel)
+                    buildWorkerWhatsappText(activeWorkerSummary, lines, periodLabel, groupLabel)
                   )
                 }
                 className="min-h-[36px] px-3 rounded-xl bg-teal-700 text-white text-xs font-bold flex items-center gap-1.5"
@@ -318,18 +325,48 @@ export const SummaryReportsView: React.FC<SummaryReportsViewProps> = ({
         </section>
       )}
 
-      {/* Full Per-Worker × Per-Line Automatic Matrix Table */}
+      {/* Full Per-Worker × Per-Line Automatic Summary (Mobile Cards + Desktop Matrix) */}
       <section className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 overflow-hidden">
-        <div className="px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100">
-              كشف الحساب التلقائي (عدد الأيام لكل خط)
-            </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              اضغط على اسم أي فرد لعرض تفصيلة أيامه أو نسخ تقريره للواتساب
-            </p>
+        <div className="px-3.5 sm:px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div>
+              <h2 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100">
+                كشف الحساب التلقائي (عدد الأيام لكل خط)
+              </h2>
+              <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                اضغط على أي عامل لعرض تفصيلة أيامه أو نسخ تقريره للواتساب
+              </p>
+            </div>
+
+            <div className="inline-flex lg:hidden items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-950 shrink-0">
+              <button
+                type="button"
+                onClick={() => setMobileLayout('cards')}
+                className={`min-h-[32px] px-2.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors ${
+                  mobileLayout === 'cards'
+                    ? 'bg-white dark:bg-slate-800 text-teal-800 dark:text-teal-300 shadow-sm'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span>كروت</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMobileLayout('table')}
+                className={`min-h-[32px] px-2.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors ${
+                  mobileLayout === 'table'
+                    ? 'bg-white dark:bg-slate-800 text-teal-800 dark:text-teal-300 shadow-sm'
+                    : 'text-slate-600 dark:text-slate-400'
+                }`}
+              >
+                <Table2 className="w-3.5 h-3.5" />
+                <span>جدول</span>
+              </button>
+            </div>
           </div>
-          <div className="relative w-full sm:w-60">
+
+          <div className="relative w-full sm:w-64">
             <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
@@ -341,7 +378,95 @@ export const SummaryReportsView: React.FC<SummaryReportsViewProps> = ({
           </div>
         </div>
 
-        <div className="overflow-x-auto">
+        {/* Mobile Cards View (Zero sideways scrolling on phone screens) */}
+        {mobileLayout === 'cards' && (
+          <div className="lg:hidden p-3 space-y-2.5 bg-slate-50/70 dark:bg-slate-950/30">
+            {filteredSummaries.map((s) => {
+              const rowNum = workers.findIndex((w) => w.id === s.worker.id) + 1;
+              const isSelected = s.worker.id === selectedWorkerId;
+              const activeItems = lines
+                .map((l) => ({ line: l, count: s.countsByLine[l.id] ?? 0 }))
+                .filter((item) => item.count > 0);
+
+              return (
+                <button
+                  key={s.worker.id}
+                  type="button"
+                  onClick={() => onSelectWorker(isSelected ? null : s.worker.id)}
+                  className={`w-full text-start rounded-xl border p-3 space-y-2 transition-colors ${
+                    isSelected
+                      ? 'bg-teal-50/70 dark:bg-teal-950/30 border-teal-400 dark:border-teal-700'
+                      : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[11px] font-mono font-bold text-slate-400 w-5 shrink-0 tabular-nums">
+                        {rowNum}
+                      </span>
+                      <span className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">
+                        {s.worker.name}
+                      </span>
+                    </div>
+                    <div className="text-left shrink-0 tabular-nums">
+                      <span className="text-xs font-bold text-teal-700 dark:text-teal-400">
+                        {formatNumClean(s.totalWorkedDays)} يوم شغل
+                      </span>
+                      {s.totalOvertimeHours > 0 && (
+                        <span className="text-[11px] font-mono font-bold text-indigo-600 dark:text-indigo-400 mr-2">
+                          +{formatNumClean(s.totalOvertimeHours)} س
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {activeItems.length > 0 ? (
+                    <div className="space-y-1">
+                      {activeItems.map(({ line, count }) => {
+                        const styles = LINE_COLOR_STYLES[line.color];
+                        const isAbsent = line.id === 'absent';
+                        return (
+                          <div
+                            key={line.id}
+                            className="flex items-center justify-between gap-2 text-xs"
+                          >
+                            <span className="flex items-center gap-1.5 min-w-0">
+                              <span
+                                className={`w-2 h-2 rounded-[2px] shrink-0 ${styles.barBg}`}
+                              />
+                              <span
+                                className={`truncate ${
+                                  isAbsent
+                                    ? 'font-bold text-rose-600 dark:text-rose-400'
+                                    : 'text-slate-700 dark:text-slate-300'
+                                }`}
+                              >
+                                {line.name}
+                              </span>
+                            </span>
+                            <span
+                              className={`font-mono font-bold tabular-nums whitespace-nowrap ${
+                                isAbsent
+                                  ? 'text-rose-600 dark:text-rose-400'
+                                  : 'text-slate-900 dark:text-slate-100'
+                              }`}
+                            >
+                              {formatNumClean(count)} يوم
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-400">لم يُسجّل عمل في هذه الفترة</p>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <div className={mobileLayout === 'cards' ? 'hidden lg:block overflow-x-auto' : 'overflow-x-auto'}>
           <table className="w-full border-collapse min-w-[920px] text-xs">
             <thead>
               <tr className="bg-slate-50 dark:bg-slate-950/70 border-b border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400">

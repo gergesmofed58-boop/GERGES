@@ -1,13 +1,15 @@
 import {
   AssignmentEntry,
   DayKey,
-  SHIFT_LABELS,
+  NIGHT_SHIFT_LABEL,
   WEEK_DAYS,
   WeekRecord,
   WorkLine,
   Worker,
   formatArabicShortDate,
   formatWeekRangeAr,
+  getWorkerFixedLineIds,
+  isLightRestLine,
   shiftIsoDays,
 } from './types';
 
@@ -57,6 +59,7 @@ export interface FairDistributionResult {
   assignments: Record<string, AssignmentEntry>;
   totalAssigned: number;
   fixedLockedCount: number;
+  restAssignedCount: number;
   returnedFromOffCount: number;
   rotatedToNewLineCount: number;
   repeatedLineCount: number;
@@ -323,19 +326,22 @@ export function computeWeekDayCoverage(
 }
 
 /**
- * Capacity-Aware Fair Rotation Distributor:
+ * Capacity-Aware & Effort-Aware Fair Rotation Distributor:
  * 1. Keeps anyone marked absent/leave today (and any already-assigned worker unless overwriteExistingWork=true).
- * 2. Fixed Line Operators (`worker.fixedLineId`): Whenever their fixed line IS running today, they stay
- *    outside fair rotation — placed directly onto their own fixed line and deducted from its required slots.
- *    If their fixed line is NOT running today, they join the rotating pool normally.
- * 3. Priority #1: Workers who were ABSENT, ON LEAVE, or OFF the previous day (e.g., missed Saturday)
- *    are automatically prioritized to go straight onto today's running lines (e.g., Sunday).
- * 4. Strict Anti-Repeat Rotation: Workers who worked on Line X yesterday are routed to a DIFFERENT
- *    running line today, balancing weekly line counts fairly.
- * 5. Pairwise Swap Polish: Eliminates any avoidable repeat of yesterday's line across all running lines.
+ * 2. Multi-Line Fixed Operators (`worker.fixedLineIds`): Whenever ANY of their fixed lines is running today,
+ *    they stay outside fair rotation and are placed directly onto their running fixed line (deducted from its slots).
+ *    If NONE of their fixed lines are running today, they join the rotating pool normally.
+ * 3. Heavy Lines vs Light/Rest Stations (e.g., التغليف اليدوي = rest/light):
+ *    - Workers who worked HARDER (most consecutive heavy-line days & fewest light/rest days this week)
+ *      and did NOT miss yesterday or rest yesterday earn the available rest/light slots first.
+ *    - Workers who missed yesterday (e.g., absent/off Saturday) or rested on light work yesterday
+ *      get top priority onto MAIN HEAVY production lines today (never given rest twice in a row!).
+ * 4. Strict Anti-Repeat Line Rotation + Pairwise Swap Polish across heavy lines so workers move to a
+ *    different production line than yesterday whenever possible.
  */
 export function suggestFairDayAssignments(
   workers: Worker[],
+  lines: WorkLine[],
   week: WeekRecord,
   targetDay: DayKey,
   targets: LineDistributionTarget[],
@@ -347,6 +353,7 @@ export function suggestFairDayAssignments(
       assignments: {},
       totalAssigned: 0,
       fixedLockedCount: 0,
+      restAssignedCount: 0,
       returnedFromOffCount: 0,
       rotatedToNewLineCount: 0,
       repeatedLineCount: 0,
@@ -354,6 +361,7 @@ export function suggestFairDayAssignments(
     };
   }
 
+  const lineMap = new Map(lines.map((l) => [l.id, l]));
   const visibleDays = getVisibleDays(week.includeFriday);
   const targetIdx = visibleDays.findIndex((d) => d.key === targetDay);
   const prevDayKey = targetIdx > 0 ? visibleDays[targetIdx - 1].key : null;
@@ -369,7 +377,7 @@ export function suggestFairDayAssignments(
   const assignments: Record<string, AssignmentEntry> = {};
   let fixedLockedCount = 0;
 
-  // Step 1: Separate absent/leave, fixed operators whose line is running today, already-assigned, and eligible rotating pool
+  // Step 1: Separate absent/leave, multi-line fixed operators whose line(s) run today, already-assigned, and eligible rotating pool
   const eligibleWorkers: Worker[] = [];
   for (const worker of workers) {
     const existing = week.assignments[worker.id]?.[targetDay];
@@ -377,24 +385,29 @@ export function suggestFairDayAssignments(
       continue;
     }
 
-    const isFixedAndRunningToday =
-      Boolean(worker.fixedLineId) && runningLineIdSet.has(worker.fixedLineId!);
+    const fixedIds = getWorkerFixedLineIds(worker);
+    const runningFixedIds = fixedIds.filter((id) => runningLineIdSet.has(id));
 
-    if (isFixedAndRunningToday) {
-      const fixedId = worker.fixedLineId!;
+    if (runningFixedIds.length > 0) {
       if (existing && !overwriteExistingWork) {
-        // Respect supervisor's manual entry for today and count their slot
         if (remainingSlots[existing.lineId] !== undefined) {
           remainingSlots[existing.lineId] = Math.max(0, remainingSlots[existing.lineId] - 1);
         }
-        if (existing.lineId === fixedId) {
+        if (runningFixedIds.includes(existing.lineId)) {
           fixedLockedCount += 1;
         }
         continue;
       }
-      // Automatically place fixed operator directly onto their fixed line (outside fair rotation)
-      assignments[worker.id] = { lineId: fixedId };
-      remainingSlots[fixedId] = Math.max(0, (remainingSlots[fixedId] ?? 0) - 1);
+
+      // If fixed on 2+ lines that are both running today, pick the one that still needs slots most
+      const openFixedIds = runningFixedIds.filter((id) => (remainingSlots[id] ?? 0) > 0);
+      const pool = openFixedIds.length > 0 ? openFixedIds : runningFixedIds;
+      const chosenFixedId = pool.reduce((best, curr) =>
+        (remainingSlots[curr] ?? 0) > (remainingSlots[best] ?? 0) ? curr : best
+      );
+
+      assignments[worker.id] = { lineId: chosenFixedId };
+      remainingSlots[chosenFixedId] = Math.max(0, (remainingSlots[chosenFixedId] ?? 0) - 1);
       fixedLockedCount += 1;
       continue;
     }
@@ -414,31 +427,64 @@ export function suggestFairDayAssignments(
     lineCounts: Record<string, number>;
     prevLineIds: Set<string>;
     wasOffYesterday: boolean;
+    wasLightRestYesterday: boolean;
+    heavyDays: number;
+    lightRestDays: number;
+    consecutiveHeavyBeforeToday: number;
     totalWorkedSoFar: number;
   }
 
   const metas: WorkerMeta[] = eligibleWorkers.map((worker) => {
     const lineCounts: Record<string, number> = {};
     let totalWorkedSoFar = 0;
+    let heavyDays = 0;
+    let lightRestDays = 0;
 
     for (const d of visibleDays) {
       if (d.key === targetDay) continue;
       const e = week.assignments[worker.id]?.[d.key];
       if (!e) continue;
+      const primary = lineMap.get(e.lineId);
+      const secondary =
+        e.secondLineId && e.secondLineId !== e.lineId
+          ? lineMap.get(e.secondLineId)
+          : undefined;
+
       if (e.lineId !== 'absent' && e.lineId !== 'leave') {
         totalWorkedSoFar += 1;
       }
-      if (e.secondLineId && e.secondLineId !== e.lineId) {
+
+      const addEffort = (ln: WorkLine | undefined, w: number) => {
+        if (!ln || ln.category === 'absence') return;
+        if (isLightRestLine(ln)) lightRestDays += w;
+        else heavyDays += w;
+      };
+
+      if (secondary) {
         lineCounts[e.lineId] = (lineCounts[e.lineId] ?? 0) + 0.5;
-        lineCounts[e.secondLineId] = (lineCounts[e.secondLineId] ?? 0) + 0.5;
+        lineCounts[secondary.id] = (lineCounts[secondary.id] ?? 0) + 0.5;
+        addEffort(primary, 0.5);
+        addEffort(secondary, 0.5);
       } else {
         lineCounts[e.lineId] = (lineCounts[e.lineId] ?? 0) + 1;
+        addEffort(primary, 1);
       }
+    }
+
+    // Count consecutive heavy-line days immediately preceding targetDay
+    let consecutiveHeavyBeforeToday = 0;
+    for (let i = targetIdx - 1; i >= 0; i--) {
+      const e = week.assignments[worker.id]?.[visibleDays[i].key];
+      if (!e) break;
+      const ln = lineMap.get(e.lineId);
+      if (!ln || ln.category === 'absence' || isLightRestLine(ln)) break;
+      consecutiveHeavyBeforeToday += 1;
     }
 
     const prevEntry = prevDayKey ? week.assignments[worker.id]?.[prevDayKey] : undefined;
     const prevLineIds = new Set<string>();
     let wasOffYesterday = false;
+    let wasLightRestYesterday = false;
 
     if (prevDayKey) {
       if (!prevEntry || prevEntry.lineId === 'absent' || prevEntry.lineId === 'leave') {
@@ -446,6 +492,16 @@ export function suggestFairDayAssignments(
       } else {
         prevLineIds.add(prevEntry.lineId);
         if (prevEntry.secondLineId) prevLineIds.add(prevEntry.secondLineId);
+        const prevPrimary = lineMap.get(prevEntry.lineId);
+        const prevSecondary = prevEntry.secondLineId
+          ? lineMap.get(prevEntry.secondLineId)
+          : undefined;
+        if (
+          isLightRestLine(prevPrimary) &&
+          (!prevSecondary || isLightRestLine(prevSecondary))
+        ) {
+          wasLightRestYesterday = true;
+        }
       }
     }
 
@@ -454,46 +510,112 @@ export function suggestFairDayAssignments(
       lineCounts,
       prevLineIds,
       wasOffYesterday,
+      wasLightRestYesterday,
+      heavyDays,
+      lightRestDays,
+      consecutiveHeavyBeforeToday,
       totalWorkedSoFar,
     };
   });
 
-  // Sort eligible rotating workers strictly by priority:
-  // 1) Workers who missed yesterday (absent / leave / unassigned on Saturday -> go straight onto Sunday's lines!)
-  // 2) Workers with fewer total worked days so far this week
-  // 3) Workers whose yesterday line IS running today (so they get placed onto a DIFFERENT line before open slots run out)
-  metas.sort((a, b) => {
+  const heavyTargets = activeTargets.filter((t) => !isLightRestLine(lineMap.get(t.lineId)));
+  const lightTargets = activeTargets.filter((t) => isLightRestLine(lineMap.get(t.lineId)));
+
+  const totalOpenHeavySlots = heavyTargets.reduce(
+    (sum, t) => sum + (remainingSlots[t.lineId] ?? 0),
+    0
+  );
+  const totalOpenLightSlots = lightTargets.reduce(
+    (sum, t) => sum + (remainingSlots[t.lineId] ?? 0),
+    0
+  );
+
+  // Step 2: Reserve the most-tired deserving workers for Light / Rest stations (e.g., التغليف اليدوي)
+  // while ensuring main heavy production lines are never starved when total workers are tight.
+  const restQuota =
+    totalOpenLightSlots === 0
+      ? 0
+      : totalOpenHeavySlots === 0
+      ? Math.min(totalOpenLightSlots, metas.length)
+      : Math.max(0, Math.min(totalOpenLightSlots, metas.length - totalOpenHeavySlots));
+
+  const restWorkerIds = new Set<string>();
+  const restSelectedMetas: WorkerMeta[] = [];
+
+  if (restQuota > 0) {
+    const restRanked = [...metas].sort((a, b) => {
+      // Never give rest to someone who missed yesterday if other workers are available
+      if (a.wasOffYesterday !== b.wasOffYesterday) {
+        return a.wasOffYesterday ? 1 : -1;
+      }
+      // Never give rest two days in a row if other workers are available
+      if (a.wasLightRestYesterday !== b.wasLightRestYesterday) {
+        return a.wasLightRestYesterday ? 1 : -1;
+      }
+      // Fewest rest/light days so far this week gets rest first
+      if (a.lightRestDays !== b.lightRestDays) {
+        return a.lightRestDays - b.lightRestDays;
+      }
+      // Most consecutive heavy-line days immediately before today gets rest first
+      if (a.consecutiveHeavyBeforeToday !== b.consecutiveHeavyBeforeToday) {
+        return b.consecutiveHeavyBeforeToday - a.consecutiveHeavyBeforeToday;
+      }
+      // Most total heavy-line days so far this week gets rest first
+      if (a.heavyDays !== b.heavyDays) {
+        return b.heavyDays - a.heavyDays;
+      }
+      return b.totalWorkedSoFar - a.totalWorkedSoFar;
+    });
+
+    for (let i = 0; i < restQuota && i < restRanked.length; i++) {
+      restWorkerIds.add(restRanked[i].worker.id);
+      restSelectedMetas.push(restRanked[i]);
+    }
+  }
+
+  // Step 3: Sort remaining rotating workers for MAIN HEAVY production lines:
+  // 1) Missed yesterday (absent / leave / unassigned Saturday -> MUST go straight onto a heavy line Sunday!)
+  // 2) Rested on light station yesterday (التغليف اليدوي yesterday -> MUST go onto a heavy line today!)
+  // 3) Fewest heavy-line days so far this week
+  // 4) Workers whose yesterday heavy line IS running today (so they rotate cleanly to another heavy line)
+  const heavyLineIdSet = new Set(heavyTargets.map((t) => t.lineId));
+  const heavyPoolMetas = metas.filter((m) => !restWorkerIds.has(m.worker.id));
+
+  heavyPoolMetas.sort((a, b) => {
     if (a.wasOffYesterday !== b.wasOffYesterday) {
       return a.wasOffYesterday ? -1 : 1;
+    }
+    if (a.wasLightRestYesterday !== b.wasLightRestYesterday) {
+      return a.wasLightRestYesterday ? -1 : 1;
+    }
+    if (a.heavyDays !== b.heavyDays) {
+      return a.heavyDays - b.heavyDays;
     }
     if (a.totalWorkedSoFar !== b.totalWorkedSoFar) {
       return a.totalWorkedSoFar - b.totalWorkedSoFar;
     }
-    const aNeedsRotation = [...a.prevLineIds].some((id) => runningLineIdSet.has(id));
-    const bNeedsRotation = [...b.prevLineIds].some((id) => runningLineIdSet.has(id));
+    const aNeedsRotation = [...a.prevLineIds].some((id) => heavyLineIdSet.has(id));
+    const bNeedsRotation = [...b.prevLineIds].some((id) => heavyLineIdSet.has(id));
     if (aNeedsRotation !== bNeedsRotation) {
       return aNeedsRotation ? -1 : 1;
     }
     return 0;
   });
 
-  const assignedLineByWorker = new Map<string, string>();
+  const assignedHeavyByWorker = new Map<string, string>();
   const metaByWorkerId = new Map(metas.map((m) => [m.worker.id, m]));
 
-  // Assign each prioritized rotating worker to the fairest open running line (strongly avoiding yesterday's line)
-  for (const meta of metas) {
-    const openLines = activeTargets.filter((t) => (remainingSlots[t.lineId] ?? 0) > 0);
-    if (openLines.length === 0) break;
+  for (const meta of heavyPoolMetas) {
+    const openHeavy = heavyTargets.filter((t) => (remainingSlots[t.lineId] ?? 0) > 0);
+    if (openHeavy.length === 0) break;
 
-    let bestLineId = openLines[0].lineId;
+    let bestLineId = openHeavy[0].lineId;
     let bestScore = Infinity;
 
-    for (const candidate of openLines) {
+    for (const candidate of openHeavy) {
       const workedSameYesterday = meta.prevLineIds.has(candidate.lineId);
       const weeklyOnCandidate = meta.lineCounts[candidate.lineId] ?? 0;
-      // Massive penalty (+1000) for repeating yesterday's line so they ALWAYS move to a different line if possible
       let score = (workedSameYesterday ? 1000 : 0) + weeklyOnCandidate * 10;
-      // Favor lines that still need more workers so big lines fill smoothly alongside smaller lines
       score -= (remainingSlots[candidate.lineId] ?? 0) * 0.15;
       if (score < bestScore) {
         bestScore = score;
@@ -501,38 +623,53 @@ export function suggestFairDayAssignments(
       }
     }
 
-    assignedLineByWorker.set(meta.worker.id, bestLineId);
+    assignedHeavyByWorker.set(meta.worker.id, bestLineId);
     remainingSlots[bestLineId] -= 1;
   }
 
-  // Pairwise Swap Polish (only across rotating pool — fixed operators are never touched)
-  const assignedIds = Array.from(assignedLineByWorker.keys());
-  for (let i = 0; i < assignedIds.length; i++) {
-    const idA = assignedIds[i];
+  // Pairwise Swap Polish across heavy lines (fixed operators & rest workers are never touched)
+  const heavyAssignedIds = Array.from(assignedHeavyByWorker.keys());
+  for (let i = 0; i < heavyAssignedIds.length; i++) {
+    const idA = heavyAssignedIds[i];
     const metaA = metaByWorkerId.get(idA)!;
-    const lineA = assignedLineByWorker.get(idA)!;
+    const lineA = assignedHeavyByWorker.get(idA)!;
     if (!metaA.prevLineIds.has(lineA)) continue;
 
-    for (let j = 0; j < assignedIds.length; j++) {
+    for (let j = 0; j < heavyAssignedIds.length; j++) {
       if (i === j) continue;
-      const idB = assignedIds[j];
+      const idB = heavyAssignedIds[j];
       const metaB = metaByWorkerId.get(idB)!;
-      const lineB = assignedLineByWorker.get(idB)!;
+      const lineB = assignedHeavyByWorker.get(idB)!;
       if (lineA === lineB) continue;
 
       if (!metaA.prevLineIds.has(lineB) && !metaB.prevLineIds.has(lineA)) {
-        assignedLineByWorker.set(idA, lineB);
-        assignedLineByWorker.set(idB, lineA);
+        assignedHeavyByWorker.set(idA, lineB);
+        assignedHeavyByWorker.set(idB, lineA);
         break;
       }
     }
   }
 
+  // Step 4: Assign reserved rest workers to Light / Rest stations (e.g., التغليف اليدوي)
+  let restAssignedCount = 0;
+  const assignedLightByWorker = new Map<string, string>();
+  for (const meta of restSelectedMetas) {
+    const openLight = lightTargets.filter((t) => (remainingSlots[t.lineId] ?? 0) > 0);
+    if (openLight.length === 0) break;
+    const bestLight = openLight.reduce((best, curr) =>
+      (meta.lineCounts[curr.lineId] ?? 0) < (meta.lineCounts[best.lineId] ?? 0) ? curr : best
+    );
+    assignedLightByWorker.set(meta.worker.id, bestLight.lineId);
+    remainingSlots[bestLight.lineId] -= 1;
+    restAssignedCount += 1;
+  }
+
+  // Finalize assignments & detailed counts
   let returnedFromOffCount = 0;
   let rotatedToNewLineCount = 0;
   let repeatedLineCount = 0;
 
-  for (const [workerId, lineId] of assignedLineByWorker.entries()) {
+  for (const [workerId, lineId] of assignedHeavyByWorker.entries()) {
     assignments[workerId] = { lineId };
     const meta = metaByWorkerId.get(workerId)!;
     if (meta.wasOffYesterday) {
@@ -543,13 +680,19 @@ export function suggestFairDayAssignments(
     }
   }
 
+  for (const [workerId, lineId] of assignedLightByWorker.entries()) {
+    assignments[workerId] = { lineId };
+  }
+
   const totalAssigned = Object.keys(assignments).length;
-  const remainingReserveCount = Math.max(0, eligibleWorkers.length - assignedLineByWorker.size);
+  const totalRotatingAssigned = assignedHeavyByWorker.size + assignedLightByWorker.size;
+  const remainingReserveCount = Math.max(0, eligibleWorkers.length - totalRotatingAssigned);
 
   return {
     assignments,
     totalAssigned,
     fixedLockedCount,
+    restAssignedCount,
     returnedFromOffCount,
     rotatedToNewLineCount,
     repeatedLineCount,
@@ -570,7 +713,8 @@ export function formatDaysArabic(n: number): string {
 export function buildWorkerWhatsappText(
   summary: WorkerSummary,
   lines: WorkLine[],
-  periodLabel: string
+  periodLabel: string,
+  groupLabel?: string
 ): string {
   const parts: string[] = [];
   for (const line of lines) {
@@ -582,7 +726,7 @@ export function buildWorkerWhatsappText(
 
   return [
     `تقرير عمل — ${summary.worker.name}`,
-    `الفترة: ${periodLabel}`,
+    `${NIGHT_SHIFT_LABEL}${groupLabel ? ` (${groupLabel})` : ''} · الفترة: ${periodLabel}`,
     `إجمالي أيام الشغل: ${formatDaysArabic(summary.totalWorkedDays)} | الغياب: ${formatDaysArabic(summary.absentDays)}${
       summary.totalOvertimeHours > 0
         ? ` | إضافي: ${formatNumClean(summary.totalOvertimeHours)} ساعة`
@@ -597,13 +741,13 @@ export function buildDailyWhatsappReport(
   workers: Worker[],
   lines: WorkLine[],
   week: WeekRecord,
-  dayKey: DayKey
+  dayKey: DayKey,
+  groupLabel?: string
 ): string {
   const dayInfo = WEEK_DAYS.find((d) => d.key === dayKey) ?? WEEK_DAYS[0];
   const dateLabel = formatArabicShortDate(
     shiftIsoDays(week.weekStartIso, dayInfo.offsetFromSat)
   );
-  const shiftLabel = SHIFT_LABELS[week.shiftType ?? 'morning'];
   const lineMap = new Map(lines.map((l) => [l.id, l]));
 
   const grouped = new Map<string, string[]>();
@@ -634,7 +778,7 @@ export function buildDailyWhatsappReport(
 
   const out: string[] = [
     `توزيع خطوط الإنتاج — ${dayInfo.label} ${dateLabel}`,
-    `${shiftLabel} | إجمالي الفريق: ${workers.length} فرد`,
+    `${NIGHT_SHIFT_LABEL}${groupLabel ? ` — ${groupLabel}` : ''} | قوة المجموعة: ${workers.length} فرد`,
     '------------------------',
   ];
 
@@ -665,13 +809,13 @@ export function buildDailyWhatsappReport(
 export function buildWeeklyWhatsappReport(
   summaries: WorkerSummary[],
   lines: WorkLine[],
-  week: WeekRecord
+  week: WeekRecord,
+  groupLabel?: string
 ): string {
   const range = formatWeekRangeAr(week.weekStartIso, week.includeFriday);
-  const shiftLabel = SHIFT_LABELS[week.shiftType ?? 'morning'];
   const out: string[] = [
     `الملخص الأسبوعي لخطوط الإنتاج`,
-    `${shiftLabel} — الأسبوع: ${range}`,
+    `${NIGHT_SHIFT_LABEL}${groupLabel ? ` — ${groupLabel}` : ''} | الأسبوع: ${range}`,
     '========================',
   ];
 
@@ -715,7 +859,8 @@ export function buildWeeklyWhatsappReport(
 export function exportWeeklyCsv(
   summaries: WorkerSummary[],
   lines: WorkLine[],
-  periodLabel: string
+  periodLabel: string,
+  groupLabel?: string
 ) {
   const headers = [
     'م',
@@ -746,7 +891,8 @@ export function exportWeeklyCsv(
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `تقرير-خطوط-الإنتاج-${periodLabel.replace(/\s+/g, '-')}.csv`;
+  const suffix = groupLabel ? `-${groupLabel.replace(/\s+/g, '-')}` : '';
+  a.download = `تقرير-الوردية-الليلية${suffix}-${periodLabel.replace(/\s+/g, '-')}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }

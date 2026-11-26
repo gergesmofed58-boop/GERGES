@@ -18,12 +18,14 @@ import {
   AssignmentEntry,
   DayKey,
   LINE_COLOR_STYLES,
-  SHIFT_LABELS,
+  NIGHT_SHIFT_LABEL,
   WeekRecord,
   WorkLine,
   Worker,
   formatArabicShortDate,
   getTodayDayKey,
+  getWorkerFixedLineIds,
+  isLightRestLine,
   shiftIsoDays,
 } from './types';
 import {
@@ -38,6 +40,7 @@ interface DailyRollCallViewProps {
   workers: Worker[];
   lines: WorkLine[];
   week: WeekRecord;
+  groupLabel: string;
   onSetAssignment: (workerId: string, dayKey: DayKey, entry: AssignmentEntry | null) => void;
   onCopyDayToDay: (fromDay: DayKey, toDay: DayKey) => void;
   onApplyDefaultsForDay: (dayKey: DayKey) => void;
@@ -54,6 +57,7 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
   workers,
   lines,
   week,
+  groupLabel,
   onSetAssignment,
   onCopyDayToDay,
   onApplyDefaultsForDay,
@@ -134,10 +138,12 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
   const fixedWorkersByLine = useMemo(() => {
     const map = new Map<string, Worker[]>();
     for (const w of workers) {
-      if (!w.fixedLineId) continue;
-      const list = map.get(w.fixedLineId) ?? [];
-      list.push(w);
-      map.set(w.fixedLineId, list);
+      const fids = getWorkerFixedLineIds(w);
+      for (const fid of fids) {
+        const list = map.get(fid) ?? [];
+        list.push(w);
+        map.set(fid, list);
+      }
     }
     return map;
   }, [workers]);
@@ -145,7 +151,8 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
   const fixedActiveTodayWorkers = useMemo(() => {
     const selectedSet = new Set(selectedLineIds);
     return workers.filter((w) => {
-      if (!w.fixedLineId || !selectedSet.has(w.fixedLineId)) return false;
+      const fids = getWorkerFixedLineIds(w);
+      if (!fids.some((id) => selectedSet.has(id))) return false;
       const todayEntry = week.assignments[w.id]?.[activeDayInfo.key];
       if (todayEntry?.lineId === 'absent' || todayEntry?.lineId === 'leave') return false;
       return true;
@@ -158,11 +165,32 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
     return workers.filter((w) => {
       const todayEntry = week.assignments[w.id]?.[activeDayInfo.key];
       if (todayEntry?.lineId === 'absent' || todayEntry?.lineId === 'leave') return false;
-      if (w.fixedLineId && selectedSet.has(w.fixedLineId)) return false;
+      if (getWorkerFixedLineIds(w).some((id) => selectedSet.has(id))) return false;
       const prevEntry = week.assignments[w.id]?.[prevDayInfo.key];
       return !prevEntry || prevEntry.lineId === 'absent' || prevEntry.lineId === 'leave';
     }).length;
   }, [workers, week, prevDayInfo, activeDayInfo.key, selectedLineIds]);
+
+  const addFixedOperatorToLine = (workerId: string, lineId: string) => {
+    const w = workers.find((x) => x.id === workerId);
+    if (!w) return;
+    const curr = getWorkerFixedLineIds(w);
+    if (curr.includes(lineId)) return;
+    onUpdateWorker(workerId, {
+      fixedLineId: undefined,
+      fixedLineIds: [...curr, lineId],
+    });
+  };
+
+  const removeFixedOperatorFromLine = (workerId: string, lineId: string) => {
+    const w = workers.find((x) => x.id === workerId);
+    if (!w) return;
+    const next = getWorkerFixedLineIds(w).filter((id) => id !== lineId);
+    onUpdateWorker(workerId, {
+      fixedLineId: undefined,
+      fixedLineIds: next.length > 0 ? next : undefined,
+    });
+  };
 
   const availableForFairCount = useMemo(() => {
     return workers.filter((w) => {
@@ -223,9 +251,14 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
           `${res.fixedLockedCount} عمالة أساسية نزلوا على خطهم تلقائي (خارج التدوير)`
         );
       }
+      if (res.restAssignedCount > 0) {
+        details.push(
+          `${res.restAssignedCount} عامل أخدوا شغل راحة (تغليف يدوي) حسب دورهم بعد تعب الخطوط`
+        );
+      }
       if (res.returnedFromOffCount > 0 && prevDayInfo) {
         details.push(
-          `${res.returnedFromOffCount} عامل كانوا غياب/إجازة يوم ${prevDayInfo.label} نزلوا أوتوماتيك على الخطوط`
+          `${res.returnedFromOffCount} عامل كانوا غياب/إجازة يوم ${prevDayInfo.label} نزلوا أوتوماتيك على الخطوط الرئيسية`
         );
       }
       if (res.rotatedToNewLineCount > 0) {
@@ -251,7 +284,7 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
   }, [workers, week, activeDayInfo.key, filterMode]);
 
   const handleCopyDayWhatsapp = async () => {
-    const text = buildDailyWhatsappReport(workers, lines, week, activeDayInfo.key);
+    const text = buildDailyWhatsappReport(workers, lines, week, activeDayInfo.key, groupLabel);
     try {
       await navigator.clipboard.writeText(text);
       setCopiedDayReport(true);
@@ -301,7 +334,7 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
               تسجيل اليوم السريع — {activeDayInfo.label} {activeDateStr}
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
-              {SHIFT_LABELS[week.shiftType ?? 'morning']} · حضور: {dayCounts.present} · غياب:{' '}
+              {NIGHT_SHIFT_LABEL} · {groupLabel} · حضور: {dayCounts.present} · غياب:{' '}
               {formatNumClean(dayCounts.map['absent'] ?? 0)} · غير مسجل: {dayCounts.unassigned}
               {dayCounts.overtimeTotal > 0 ? ` · إضافي: ${dayCounts.overtimeTotal} س` : ''}
             </p>
@@ -373,8 +406,7 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
                   التوزيع العادل للخطوط — يوم {activeDayInfo.label}
                 </h2>
                 <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                  اختر الخطوط الشغالة النهاردة: اللي كان شغال على خط امبارح بيتنقل تلقائي لخط تاني، واللي مجاش{' '}
-                  {prevDayInfo ? `يوم ${prevDayInfo.label}` : 'اليوم اللي قبله'} بينزل أوتوماتيك على الخط بأولوية أولى.
+                  اختر الخطوط الشغالة النهاردة: اللي مجاش {prevDayInfo ? `يوم ${prevDayInfo.label}` : 'امبارح'} أو كان في راحة (تغليف يدوي) بينزل أوتوماتيك على الخطوط الرئيسية، وشغل الراحة (التغليف اليدوي) بيروح للي اتعب أكتر على الخطوط حسب الدور.
                 </p>
                 {prevDayInfo && offYesterdayReturningToday > 0 && (
                   <p className="text-xs font-bold text-teal-800 dark:text-teal-300 mt-1 tabular-nums">
@@ -455,6 +487,11 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
                         <div className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">
                           {line.name}
                         </div>
+                        {isLightRestLine(line) && (
+                          <div className="text-[10px] font-semibold text-teal-700 dark:text-teal-300 truncate">
+                            شغل راحة / خفيف (بالدور للمُجهدين)
+                          </div>
+                        )}
                         {fixedOnThisLine.length > 0 && (
                           <div className="text-[10px] font-semibold text-amber-800 dark:text-amber-300 truncate tabular-nums">
                             أساسي ثابت: {fixedOnThisLine.length}{' '}
@@ -501,7 +538,7 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
                     العمالة الأساسية المثبّتة على خطوط اليوم: {fixedActiveTodayWorkers.length} عامل
                   </span>
                   <span className="text-slate-500 dark:text-slate-400 hidden sm:inline">
-                    (خارج التوزيع العادل لو خطهم شغال)
+                    (تقدر تثبّت نفس العامل على أكتر من خط)
                   </span>
                 </div>
                 <button
@@ -516,7 +553,7 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
               {showFixedManager && (
                 <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
                   <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                    حدّد أكتر من عامل أساسي لكل خط (مثلاً مشغّل ماكينة). أي عامل هنا ينزل على خطه مباشرة وبرة التوزيع العادل طالما خطه شغال، ولو خطه واقف النهاردة يتوزّع بالعدل عادي.
+                    تقدر تثبّت نفس العامل أساسي على أكتر من خط (مثلاً مشغّل ماكينة للانتينال والابيدون معاً). أي خط منهم يشتغل النهاردة ينزل عليه تلقائي وبرة التدوير.
                   </p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {productionLines
@@ -525,7 +562,9 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
                       )
                       .map((line) => {
                         const pinned = fixedWorkersByLine.get(line.id) ?? [];
-                        const candidates = workers.filter((w) => w.fixedLineId !== line.id);
+                        const candidates = workers.filter(
+                          (w) => !getWorkerFixedLineIds(w).includes(line.id)
+                        );
                         return (
                           <div
                             key={line.id}
@@ -553,10 +592,8 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
                                     <span>{w.name}</span>
                                     <button
                                       type="button"
-                                      onClick={() =>
-                                        onUpdateWorker(w.id, { fixedLineId: undefined })
-                                      }
-                                      aria-label={`فك تثبيت ${w.name}`}
+                                      onClick={() => removeFixedOperatorFromLine(w.id, line.id)}
+                                      aria-label={`فك تثبيت ${w.name} من ${line.name}`}
                                       className="text-slate-400 hover:text-rose-600"
                                     >
                                       <X className="w-3 h-3" />
@@ -575,19 +612,22 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
                               value=""
                               onChange={(e) => {
                                 if (!e.target.value) return;
-                                onUpdateWorker(e.target.value, { fixedLineId: line.id });
+                                addFixedOperatorToLine(e.target.value, line.id);
                               }}
                               className="w-full min-h-[34px] px-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-200"
                             >
                               <option value="">+ تثبيت عامل أساسي على {line.shortName}...</option>
                               {candidates.map((w) => {
-                                const prevFixed = w.fixedLineId
-                                  ? lineMap.get(w.fixedLineId)?.shortName
-                                  : null;
+                                const otherFixed = getWorkerFixedLineIds(w)
+                                  .map((id) => lineMap.get(id)?.shortName)
+                                  .filter(Boolean);
                                 return (
                                   <option key={w.id} value={w.id}>
                                     {w.name} ({w.role}
-                                    {prevFixed ? ` · حالياً أساسي ${prevFixed}` : ''})
+                                    {otherFixed.length > 0
+                                      ? ` · أساسي أيضاً: ${otherFixed.join('، ')}`
+                                      : ''}
+                                    )
                                   </option>
                                 );
                               })}
@@ -790,12 +830,18 @@ export const DailyRollCallView: React.FC<DailyRollCallViewProps> = ({
                         <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-slate-100">
                           {worker.name}
                         </h3>
-                        {worker.fixedLineId && lineMap.get(worker.fixedLineId) && (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 dark:text-amber-300">
-                            <Pin className="w-3 h-3" />
-                            <span>أساسي · {lineMap.get(worker.fixedLineId)!.shortName}</span>
-                          </span>
-                        )}
+                        {(() => {
+                          const fNames = getWorkerFixedLineIds(worker)
+                            .map((id) => lineMap.get(id)?.shortName)
+                            .filter(Boolean);
+                          if (fNames.length === 0) return null;
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 dark:text-amber-300">
+                              <Pin className="w-3 h-3 shrink-0" />
+                              <span>أساسي · {fNames.join('، ')}</span>
+                            </span>
+                          );
+                        })()}
                       </div>
                       <p className="text-xs text-slate-500 dark:text-slate-400">
                         {worker.role}
