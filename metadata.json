@@ -1,7 +1,9 @@
 {
   "name": "NetPulse — مدير الراوتر",
   "description": "Cross-platform Flutter mobile app & interactive simulator for Wi-Fi management, router admin login, connected devices control, and bandwidth/quota allocation across multiple router models.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": [
+    "geolocation"
+  ],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
